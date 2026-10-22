@@ -1,12 +1,11 @@
 {
   "name": "miniblox-bot",
   "version": "1.0.0",
-  "description": "Miniblox bot 24/7",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "puppeteer": "^22.0.0"
+    "playwright": "^1.49.0"
   }
 }

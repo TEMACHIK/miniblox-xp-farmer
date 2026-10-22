@@ -1,1 +1,1 @@
-# miniblox-xp-farmer
+# miniblox-farmer
