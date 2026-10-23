@@ -1,4 +1,4 @@
-name: Miniblox Multi-Bot
+name: Miniblox Bot
 
 on:
   schedule:
@@ -9,36 +9,14 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 350
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - server: skdke
-            worldId: 3080530
-          - server: lovely-smp
-            worldId: 3037844
-          - server: hide-and-seek
-            worldId: 3081484
-          - server: gun-game
-            worldId: 3036573
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: Install deps
-        run: npm install
-
-      - name: Install Chromium
-        run: npx playwright install chromium --with-deps
-
-      - name: Run bot (${{ matrix.server }})
+      - run: npm install
+      - run: npx playwright install chromium --with-deps
+      - name: Run bot
         env:
-          WORLD_ID: ${{ matrix.worldId }}
-          SERVER_NAME: ${{ matrix.server }}
           MB_SESSION: ${{ secrets.MB_SESSION }}
         run: npm start
