@@ -1,4 +1,4 @@
-name: Miniblox Bot
+name: Miniblox Multi-Bot
 
 on:
   schedule:
@@ -9,14 +9,32 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: skdke
+            cardData: "DONT JOIN! I AM AFK!"
+          - server: oneblock-2
+            cardData: "DONT JOIN! I AM AFK! #2"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: npm install
-      - run: npx playwright install chromium --with-deps
-      - name: Run bot
+
+      - name: Install deps
+        run: npm install
+
+      - name: Install Chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Run bot (${{ matrix.server }})
         env:
+          SERVER_NAME: ${{ matrix.server }}
+          CARD_DATA: ${{ matrix.cardData }}
           MB_SESSION: ${{ secrets.MB_SESSION }}
         run: npm start
