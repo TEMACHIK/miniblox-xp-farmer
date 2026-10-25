@@ -13,10 +13,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - server: skdke
+          - server: server1
             cardData: "DONT JOIN! I AM AFK!"
-          - server: oneblock-2
+          - server: server2
             cardData: "DONT JOIN! I AM AFK! #2"
+          - server: server3
+            cardData: "DONT JOIN! I AM AFK! #3"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
