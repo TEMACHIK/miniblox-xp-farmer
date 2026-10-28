@@ -8,18 +8,22 @@ const MAX_RUNTIME_MS = 320 * 60 * 1000;
 const KEY_PRESS_INTERVAL_MS = 1000;
 const CHECK_ALIVE_EVERY_MS = 30000;
 
+// Сколько раз пробовать первый вход и с какими паузами
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_RETRY_DELAYS_MS = [30000, 60000, 90000, 120000]; // 30с, 60с, 90с, 120с
+// Сколько раз пробовать реконнект внутри игры
+const RECONNECT_MAX_ATTEMPTS = 3;
+const RECONNECT_RETRY_DELAYS_MS = [15000, 30000]; // 15с, 30с
+
 if (!CARD_DATA) { console.error('❌ CARD_DATA не задан!'); process.exit(1); }
 if (!SESSION_COOKIE_VALUE) { console.error('❌ MB_SESSION не задана!'); process.exit(1); }
 
 const log = (...args) => console.log(`[${new Date().toISOString()}][${SERVER_NAME}]`, ...args);
 
-// Селектор карточки по атрибуту data у span внутри неё
 function buildCardSelector(cardData) {
-  // Экранируем одинарные кавычки, если вдруг появятся в названии
   const safe = cardData.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   return `div[role="button"]:has(span[data='${safe}'])`;
 }
-
 const CARD_SEL = buildCardSelector(CARD_DATA);
 
 async function tryCloseDialogs(page, ctx = '') {
@@ -43,6 +47,7 @@ async function waitForJoin(page, ms) {
   return false;
 }
 
+// Одна попытка входа. Возвращает true, если мы в игре.
 async function loginToWorld(page) {
   log('🔁 Вход');
   try {
@@ -99,8 +104,27 @@ async function loginToWorld(page) {
     }
   }
 
-  let joined = await waitForJoin(page, 15000);
+  // Ждём либо URL /join/, либо тоста с ошибкой сервера
+  const startWait = Date.now();
+  let joined = false;
+  let serverError = null;
+  while (Date.now() - startWait < 15000) {
+    if (/\/join\//.test(page.url())) { joined = true; break; }
+    if (!serverError) {
+      // ищем текст ошибки "Could not start your planet" на странице
+      serverError = await page.evaluate(() => {
+        const nodes = document.querySelectorAll('[role="alert"], .chakra-alert, .chakra-toast');
+        for (const n of nodes) {
+          if ((n.textContent || '').includes('Could not start')) return n.textContent.trim();
+        }
+        return null;
+      });
+    }
+    await page.waitForTimeout(500);
+  }
+
   if (!joined) {
+    if (serverError) log(`❌ Сервер отклонил запуск: ${serverError.slice(0, 100)}`);
     log('⚠️ Load fallback');
     await tryCloseDialogs(page, 'load2');
     let btn = page.locator('[data-scope="dialog"] button:has-text("Load")').last();
@@ -110,6 +134,7 @@ async function loginToWorld(page) {
       joined = await waitForJoin(page, 30000);
     }
   }
+
   if (!joined) {
     log(`❌ не зашли. URL: ${page.url()}`);
     return false;
@@ -120,6 +145,27 @@ async function loginToWorld(page) {
   const ok = !!(await page.$('canvas'));
   log(`🎮 canvas: ${ok ? '✅' : '⚠️'}`);
   return ok;
+}
+
+// Вход с ретраями. Возвращает true, если в итоге зашли.
+async function loginWithRetry(page, maxAttempts, delaysMs, label) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    log(`🎯 [${label}] попытка ${attempt}/${maxAttempts}`);
+    const ok = await loginToWorld(page);
+    if (ok) {
+      if (attempt > 1) log(`✅ [${label}] успех с попытки ${attempt}`);
+      return true;
+    }
+    if (attempt < maxAttempts) {
+      const delay = delaysMs[Math.min(attempt - 1, delaysMs.length - 1)];
+      log(`😴 [${label}] неудача. Ждём ${delay / 1000}с и повторяем...`);
+      await page.waitForTimeout(delay);
+      // Сбрасываем состояние между попытками — чтобы не осталось модалок
+      try { await tryCloseDialogs(page, `${label}-retry`); } catch {}
+    }
+  }
+  log(`❌ [${label}] все ${maxAttempts} попыток провалились`);
+  return false;
 }
 
 (async () => {
@@ -162,8 +208,15 @@ async function loginToWorld(page) {
     ws.on('socketerror', e => log(`🔌 [WS ERR] ${String(e).slice(0, 100)}`));
   });
 
-  if (!(await loginToWorld(page))) {
-    log('❌ Первый вход не удался');
+  // Первый вход — с ретраями
+  const firstOk = await loginWithRetry(
+    page,
+    LOGIN_MAX_ATTEMPTS,
+    LOGIN_RETRY_DELAYS_MS,
+    'first-login'
+  );
+  if (!firstOk) {
+    log('💀 Не удалось войти после всех попыток — выхожу');
     await browser.close();
     process.exit(1);
   }
@@ -186,7 +239,13 @@ async function loginToWorld(page) {
       if (!/\/join\//.test(page.url())) {
         recon++;
         log(`🚨 [RECONNECT #${recon}] выкинуло. URL: ${page.url()}`);
-        if (await loginToWorld(page)) {
+        const reOk = await loginWithRetry(
+          page,
+          RECONNECT_MAX_ATTEMPTS,
+          RECONNECT_RETRY_DELAYS_MS,
+          `reconnect-${recon}`
+        );
+        if (reOk) {
           log(`✅ [RECONNECT #${recon}] вернулись`);
           try {
             const c = page.locator('canvas').first();
@@ -194,8 +253,8 @@ async function loginToWorld(page) {
             if (b) await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
           } catch {}
         } else {
-          log(`❌ [RECONNECT #${recon}] не удалось, ждём 30с`);
-          await page.waitForTimeout(30000);
+          log(`❌ [RECONNECT #${recon}] не удалось, ждём 60с и пробуем в следующем цикле`);
+          await page.waitForTimeout(60000);
         }
         lastCheck = Date.now();
         continue;
