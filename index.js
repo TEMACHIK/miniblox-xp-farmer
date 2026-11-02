@@ -8,17 +8,26 @@ const MAX_RUNTIME_MS = 320 * 60 * 1000;
 const KEY_PRESS_INTERVAL_MS = 1000;
 const CHECK_ALIVE_EVERY_MS = 30000;
 
-// Сколько раз пробовать первый вход и с какими паузами
 const LOGIN_MAX_ATTEMPTS = 5;
-const LOGIN_RETRY_DELAYS_MS = [30000, 60000, 90000, 120000]; // 30с, 60с, 90с, 120с
-// Сколько раз пробовать реконнект внутри игры
-const RECONNECT_MAX_ATTEMPTS = 3;
-const RECONNECT_RETRY_DELAYS_MS = [15000, 30000]; // 15с, 30с
+const LOGIN_RETRY_DELAYS_MS = [30000, 60000, 90000, 120000];
+
+// Реконнект: больше попыток и нарастающие паузы, чтобы не злить miniblox
+const RECONNECT_MAX_ATTEMPTS = 4;
+const RECONNECT_RETRY_DELAYS_MS = [30000, 60000, 90000]; // 30с, 60с, 90с
 
 if (!CARD_DATA) { console.error('❌ CARD_DATA не задан!'); process.exit(1); }
 if (!SESSION_COOKIE_VALUE) { console.error('❌ MB_SESSION не задана!'); process.exit(1); }
 
 const log = (...args) => console.log(`[${new Date().toISOString()}][${SERVER_NAME}]`, ...args);
+
+// 🛡️ Глобальные ловушки — чтобы процесс не умирал молча
+process.on('uncaughtException', (e) => {
+  log(`💥 [uncaughtException] ${e.message}`);
+  log(e.stack || '');
+});
+process.on('unhandledRejection', (e) => {
+  log(`💥 [unhandledRejection] ${e && e.message ? e.message : String(e)}`);
+});
 
 function buildCardSelector(cardData) {
   const safe = cardData.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -26,28 +35,38 @@ function buildCardSelector(cardData) {
 }
 const CARD_SEL = buildCardSelector(CARD_DATA);
 
+// Безопасное чтение URL — не кидает, если page закрыт
+function safeUrl(page) {
+  try { return page.url(); } catch { return '<closed>'; }
+}
+function isOnJoin(page) {
+  const u = safeUrl(page);
+  return typeof u === 'string' && /\/join\//.test(u);
+}
+
 async function tryCloseDialogs(page, ctx = '') {
   const sel = '[data-scope="dialog"][data-part="positioner"]';
-  if (await page.locator(sel).count() === 0) return true;
-  log(`⚠️ [${ctx}] закрываю диалоги`);
-  for (let i = 0; i < 3; i++) {
-    await page.keyboard.press('Escape');
-    await page.waitForTimeout(600);
+  try {
     if (await page.locator(sel).count() === 0) return true;
-  }
-  return (await page.locator(sel).count()) === 0;
+    log(`⚠️ [${ctx}] закрываю диалоги`);
+    for (let i = 0; i < 3; i++) {
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(600);
+      if (await page.locator(sel).count() === 0) return true;
+    }
+  } catch {}
+  return false;
 }
 
 async function waitForJoin(page, ms) {
   const start = Date.now();
   while (Date.now() - start < ms) {
-    if (/\/join\//.test(page.url())) return true;
+    if (isOnJoin(page)) return true;
     await page.waitForTimeout(500);
   }
   return false;
 }
 
-// Одна попытка входа. Возвращает true, если мы в игре.
 async function loginToWorld(page) {
   log('🔁 Вход');
   try {
@@ -104,14 +123,12 @@ async function loginToWorld(page) {
     }
   }
 
-  // Ждём либо URL /join/, либо тоста с ошибкой сервера
   const startWait = Date.now();
   let joined = false;
   let serverError = null;
   while (Date.now() - startWait < 15000) {
-    if (/\/join\//.test(page.url())) { joined = true; break; }
+    if (isOnJoin(page)) { joined = true; break; }
     if (!serverError) {
-      // ищем текст ошибки "Could not start your planet" на странице
       serverError = await page.evaluate(() => {
         const nodes = document.querySelectorAll('[role="alert"], .chakra-alert, .chakra-toast');
         for (const n of nodes) {
@@ -136,22 +153,27 @@ async function loginToWorld(page) {
   }
 
   if (!joined) {
-    log(`❌ не зашли. URL: ${page.url()}`);
+    log(`❌ не зашли. URL: ${safeUrl(page)}`);
     return false;
   }
 
-  log(`✅ /join/: ${page.url()}`);
+  log(`✅ /join/: ${safeUrl(page)}`);
   await page.waitForTimeout(15000);
-  const ok = !!(await page.$('canvas'));
+  let ok = false;
+  try { ok = !!(await page.$('canvas')); } catch {}
   log(`🎮 canvas: ${ok ? '✅' : '⚠️'}`);
   return ok;
 }
 
-// Вход с ретраями. Возвращает true, если в итоге зашли.
 async function loginWithRetry(page, maxAttempts, delaysMs, label) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     log(`🎯 [${label}] попытка ${attempt}/${maxAttempts}`);
-    const ok = await loginToWorld(page);
+    let ok = false;
+    try {
+      ok = await loginToWorld(page);
+    } catch (e) {
+      log(`❌ [${label}] loginToWorld упал: ${e.message.slice(0, 120)}`);
+    }
     if (ok) {
       if (attempt > 1) log(`✅ [${label}] успех с попытки ${attempt}`);
       return true;
@@ -159,8 +181,7 @@ async function loginWithRetry(page, maxAttempts, delaysMs, label) {
     if (attempt < maxAttempts) {
       const delay = delaysMs[Math.min(attempt - 1, delaysMs.length - 1)];
       log(`😴 [${label}] неудача. Ждём ${delay / 1000}с и повторяем...`);
-      await page.waitForTimeout(delay);
-      // Сбрасываем состояние между попытками — чтобы не осталось модалок
+      try { await page.waitForTimeout(delay); } catch { return false; }
       try { await tryCloseDialogs(page, `${label}-retry`); } catch {}
     }
   }
@@ -168,15 +189,9 @@ async function loginWithRetry(page, maxAttempts, delaysMs, label) {
   return false;
 }
 
-(async () => {
-  const startTime = Date.now();
-  log(`🚀 Старт (карточка: "${CARD_DATA}")`);
-
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
-
+// Создаёт новый context+page с той же cookie
+async function createFreshPage(browser) {
+  log('🆕 Создаю новый context+page (пересборка после падения)');
   const context = await browser.newContext({
     viewport: { width: 1280, height: 800 },
     storageState: {
@@ -192,11 +207,10 @@ async function loginWithRetry(page, maxAttempts, delaysMs, label) {
       origins: []
     }
   });
-
   const page = await context.newPage();
 
   page.on('framenavigated', f => {
-    if (f === page.mainFrame()) log(`🔄 [NAV] ${f.url()}`);
+    if (f === page.mainFrame()) log(`🔄 [NAV] ${safeUrl(page)}`);
   });
   page.on('pageerror', e => log(`❌ [PAGE] ${e.message.slice(0, 150)}`));
   page.on('console', m => {
@@ -207,17 +221,35 @@ async function loginWithRetry(page, maxAttempts, delaysMs, label) {
     ws.on('close', () => log(`🔌 [WS CLOSE]`));
     ws.on('socketerror', e => log(`🔌 [WS ERR] ${String(e).slice(0, 100)}`));
   });
+  page.on('crash', () => log('💥 [CRASH] страница упала!'));
+  page.on('close', () => log('🚪 [CLOSE] страница закрыта'));
+
+  return { context, page };
+}
+
+(async () => {
+  const startTime = Date.now();
+  log(`🚀 Старт (карточка: "${CARD_DATA}")`);
+
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+
+  let { context, page } = await createFreshPage(browser);
+
+  let pageDead = false;
+  const attachDeathHandlers = (p) => {
+    p.on('crash', () => { pageDead = true; log('💥 page crash — помечен мёртвым'); });
+    p.on('close', () => { pageDead = true; log('🚪 page closed — помечен мёртвым'); });
+  };
+  attachDeathHandlers(page);
 
   // Первый вход — с ретраями
-  const firstOk = await loginWithRetry(
-    page,
-    LOGIN_MAX_ATTEMPTS,
-    LOGIN_RETRY_DELAYS_MS,
-    'first-login'
-  );
+  const firstOk = await loginWithRetry(page, LOGIN_MAX_ATTEMPTS, LOGIN_RETRY_DELAYS_MS, 'first-login');
   if (!firstOk) {
     log('💀 Не удалось войти после всех попыток — выхожу');
-    await browser.close();
+    try { await browser.close(); } catch {}
     process.exit(1);
   }
 
@@ -232,64 +264,98 @@ async function loginWithRetry(page, maxAttempts, delaysMs, label) {
   let iter = 0;
   let recon = 0;
   let lastCheck = Date.now();
+  let lastMemLog = Date.now();
 
   while (Date.now() - startTime < MAX_RUNTIME_MS) {
-    if (Date.now() - lastCheck > CHECK_ALIVE_EVERY_MS) {
-      lastCheck = Date.now();
-      if (!/\/join\//.test(page.url())) {
-        recon++;
-        log(`🚨 [RECONNECT #${recon}] выкинуло. URL: ${page.url()}`);
-        const reOk = await loginWithRetry(
-          page,
-          RECONNECT_MAX_ATTEMPTS,
-          RECONNECT_RETRY_DELAYS_MS,
-          `reconnect-${recon}`
-        );
-        if (reOk) {
-          log(`✅ [RECONNECT #${recon}] вернулись`);
-          try {
-            const c = page.locator('canvas').first();
-            const b = await c.boundingBox();
-            if (b) await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
-          } catch {}
-        } else {
-          log(`❌ [RECONNECT #${recon}] не удалось, ждём 60с и пробуем в следующем цикле`);
-          await page.waitForTimeout(60000);
+    try {
+      // === Проверка живости page ===
+      if (pageDead) {
+        log('🔧 page мёртв — пересобираю context+page');
+        try { await context.close(); } catch {}
+        try {
+          const fresh = await createFreshPage(browser);
+          context = fresh.context;
+          page = fresh.page;
+          pageDead = false;
+          attachDeathHandlers(page);
+        } catch (e) {
+          log(`❌ Не удалось пересоздать page: ${e.message.slice(0, 120)}`);
+          await new Promise(r => setTimeout(r, 30000));
+          continue;
         }
+        const reOk = await loginWithRetry(page, RECONNECT_MAX_ATTEMPTS, RECONNECT_RETRY_DELAYS_MS, `rebuild-login`);
+        if (reOk) log('✅ Пересборка успешна');
+        else { log('❌ Пересборка не удалась, ждём 60с'); await new Promise(r => setTimeout(r, 60000)); }
         lastCheck = Date.now();
         continue;
       }
-    }
 
-    try {
-      await page.keyboard.down('KeyW'); await page.waitForTimeout(200); await page.keyboard.up('KeyW');
-      await page.keyboard.down('KeyA'); await page.waitForTimeout(200); await page.keyboard.up('KeyA');
-      await page.keyboard.down('KeyS'); await page.waitForTimeout(200); await page.keyboard.up('KeyS');
-      await page.keyboard.down('KeyD'); await page.waitForTimeout(200); await page.keyboard.up('KeyD');
-      await page.keyboard.press('Space');
-    } catch (e) {
-      log(`⚠️ нажатие: ${e.message.slice(0, 80)}`);
-    }
-
-    iter++;
-    if (iter % 15 === 0) {
-      try {
-        const c = page.locator('canvas').first();
-        const b = await c.boundingBox();
-        if (b) {
-          await page.mouse.move(
-            b.x + b.width * (0.3 + Math.random() * 0.4),
-            b.y + b.height * (0.3 + Math.random() * 0.4)
-          );
+      // === Проверка URL ===
+      if (Date.now() - lastCheck > CHECK_ALIVE_EVERY_MS) {
+        lastCheck = Date.now();
+        if (!isOnJoin(page)) {
+          recon++;
+          log(`🚨 [RECONNECT #${recon}] выкинуло. URL: ${safeUrl(page)}`);
+          const reOk = await loginWithRetry(page, RECONNECT_MAX_ATTEMPTS, RECONNECT_RETRY_DELAYS_MS, `reconnect-${recon}`);
+          if (reOk) {
+            log(`✅ [RECONNECT #${recon}] вернулись`);
+            try {
+              const c = page.locator('canvas').first();
+              const b = await c.boundingBox();
+              if (b) await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+            } catch {}
+          } else {
+            log(`❌ [RECONNECT #${recon}] не удалось, ждём 60с`);
+            await new Promise(r => setTimeout(r, 60000));
+          }
+          lastCheck = Date.now();
+          continue;
         }
-      } catch {}
-    }
+      }
 
-    await page.waitForTimeout(KEY_PRESS_INTERVAL_MS);
+      // === Периодический лог памяти (раз в 10 мин) ===
+      if (Date.now() - lastMemLog > 10 * 60 * 1000) {
+        lastMemLog = Date.now();
+        const m = process.memoryUsage();
+        log(`📊 mem: rss=${(m.rss / 1024 / 1024).toFixed(0)}MB, heap=${(m.heapUsed / 1024 / 1024).toFixed(0)}MB`);
+      }
+
+      // === Движение ===
+      try {
+        await page.keyboard.down('KeyW'); await page.waitForTimeout(200); await page.keyboard.up('KeyW');
+        await page.keyboard.down('KeyA'); await page.waitForTimeout(200); await page.keyboard.up('KeyA');
+        await page.keyboard.down('KeyS'); await page.waitForTimeout(200); await page.keyboard.up('KeyS');
+        await page.keyboard.down('KeyD'); await page.waitForTimeout(200); await page.keyboard.up('KeyD');
+        await page.keyboard.press('Space');
+      } catch (e) {
+        log(`⚠️ нажатие: ${e.message.slice(0, 80)}`);
+      }
+
+      iter++;
+      if (iter % 15 === 0) {
+        try {
+          const c = page.locator('canvas').first();
+          const b = await c.boundingBox();
+          if (b) {
+            await page.mouse.move(
+              b.x + b.width * (0.3 + Math.random() * 0.4),
+              b.y + b.height * (0.3 + Math.random() * 0.4)
+            );
+          }
+        } catch {}
+      }
+
+      await page.waitForTimeout(KEY_PRESS_INTERVAL_MS);
+
+    } catch (e) {
+      // 🛡️ Ловим всё, что могло вылететь из итерации — не даём умереть
+      log(`💥 [LOOP ERROR] ${e.message.slice(0, 150)}`);
+      await new Promise(r => setTimeout(r, 10000));
+    }
   }
 
   log(`⏰ 5ч20м. Итераций: ${iter}, реконнектов: ${recon}`);
-  await browser.close();
+  try { await browser.close(); } catch {}
 })().catch(e => {
   log(`💀 FATAL: ${e.message}`);
   process.exit(1);
