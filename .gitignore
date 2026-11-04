@@ -1,0 +1,37 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json.bak
+
+# Playwright
+playwright-report/
+test-results/
+.playwright/
+
+# Debug-артефакты от бота
+debug-*.png
+debug-*.json
+*.log
+
+# Переменные окружения / секреты
+.env
+.env.*
+!.env.example
+
+# ОС
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Временные файлы
+*.tmp
+*.bak
+.cache/
