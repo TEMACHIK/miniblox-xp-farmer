@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const fs = require('fs'); // нужен для сохранения debug-файлов
 
 const MAIN_URL = 'https://miniblox.io/';
 const BROWSE_MODE = process.env.BROWSE_MODE === '1';
@@ -6,7 +7,7 @@ const CARD_DATA = process.env.CARD_DATA;
 const SERVER_NAME = process.env.SERVER_NAME || (BROWSE_MODE ? 'browse' : 'bot');
 const SESSION_COOKIE_VALUE = process.env.MB_SESSION;
 
-const MAX_RUNTIME_MS = 320 * 60 * 1000;
+const MAX_RUNTIME_MS = 320 * 60 * 1000; // 5ч20м
 const KEY_PRESS_INTERVAL_MS = 1000;
 const CHECK_ALIVE_EVERY_MS = 30000;
 
@@ -22,7 +23,9 @@ const LAUNCH_STAGGER_MS = parseInt(process.env.LAUNCH_STAGGER_SEC || '45', 10) *
 // ❌ Серверы, которые НЕ трогаем по worldId (из URL картинки world-splash/<id>.jpg)
 const SKIP_WORLD_IDS = [
   3092789, // 𝐓𝐇𝐄 𝐊𝐈𝐍𝐆 𝐒𝐌𝐏: 𝐄𝐕𝐎𝐋𝐕𝐄𝐃
+  3080530, // DONT JOIN! I AM AFK! (skdke) — на всякий случай продублировали
 ];
+
 // ❌ Плюс пропускаем по тексту (наши серверы DONT JOIN)
 const SKIP_PATTERN = /dont\s*join/i;
 
@@ -245,6 +248,7 @@ async function runOneServerBot(browser, srv, overallStartTime, delayBeforeStart)
 async function extractWorldId(card) {
   try {
     const img = card.locator('img.chakra-image').first();
+    if (await img.count() === 0) return null;
     const src = await img.getAttribute('src');
     if (!src) return null;
     const m = src.match(/world-splash\/(\d+)\./);
@@ -274,7 +278,32 @@ async function browseAllServersParallel(browser, startTime) {
     return;
   }
 
-  const cardsLoc = scoutPage.locator('div[role="button"]:has(img.chakra-image):has(p span[data])');
+  // 🆕 ЖДЁМ ЯВНОГО ПОЯВЛЕНИЯ КАРТОЧЕК (фикс "0 карточек")
+  const cardSelector = 'div[role="button"]:has(span[data])';
+  log(`⏳ жду загрузки карточек (${cardSelector})...`);
+
+  try {
+    await scoutPage.waitForSelector(cardSelector, { timeout: 15000 });
+    log('✅ карточки появились');
+  } catch (e) {
+    log(`⚠️ карточки не появились за 15с, пробую Refresh...`);
+    try {
+      await scoutPage.click('button[aria-label="Refresh planet list"]', { timeout: 5000 });
+      await scoutPage.waitForTimeout(3000);
+      await scoutPage.waitForSelector(cardSelector, { timeout: 15000 });
+      log('✅ карточки появились после Refresh');
+    } catch (e2) {
+      log(`❌ всё равно нет карточек: ${e2.message.slice(0, 80)}`);
+      try {
+        await scoutPage.screenshot({ path: 'debug-planets.png', fullPage: true });
+        const html = await scoutPage.content();
+        fs.writeFileSync('debug-planets.html', html);
+        log('💾 сохранил debug-planets.png и debug-planets.html');
+      } catch {}
+    }
+  }
+
+  const cardsLoc = scoutPage.locator(cardSelector);
   const count = await cardsLoc.count();
   log(`📋 карточек на странице: ${count}`);
 
@@ -285,31 +314,33 @@ async function browseAllServersParallel(browser, startTime) {
     const card = cardsLoc.nth(i);
     let data = '', text = '';
     try {
-      const span = card.locator('p span[data]').first();
+      const span = card.locator('span[data]').first();
+      if (await span.count() === 0) continue;
       data = (await span.getAttribute('data')) || '';
       text = ((await span.textContent()) || '').trim();
     } catch { continue; }
     if (!text || !data) continue;
 
-    // 1️⃣ Пропуск по worldId (надёжно для серверов с юникод-названиями)
+    // 1️⃣ Пропуск по worldId
     const worldId = await extractWorldId(card);
     if (worldId !== null && SKIP_WORLD_IDS.includes(worldId)) {
       log(`⏭️ пропуск по worldId ${worldId}: "${text.replace(/\s+/g, ' ').slice(0, 50)}"`);
       continue;
     }
 
-    // 2️⃣ Пропуск по тексту (DONT JOIN и подобное)
+    // 2️⃣ Пропуск по тексту (DONT JOIN)
     if (SKIP_PATTERN.test(data) || SKIP_PATTERN.test(text)) {
       log(`⏭️ пропуск по тексту: "${text.replace(/\s+/g, ' ').slice(0, 50)}"`);
       continue;
     }
 
-    // 3️⃣ Дедуп по data (уникальный ключ карточки)
+    // 3️⃣ Дедуп по data
     if (seen.has(data)) continue;
     seen.add(data);
 
     servers.push({ text, data, worldId });
   }
+  
   await scoutCtx.close();
 
   log(`📋 уникальных серверов (после фильтра): ${servers.length}`);
@@ -349,7 +380,7 @@ async function browseAllServersParallel(browser, startTime) {
     return;
   }
 
-  // ===== ACCOUNT MODE (без изменений) =====
+  // ===== ACCOUNT MODE (для bot.yml) =====
   const context = await browser.newContext({
     viewport: { width: 1280, height: 800 },
     storageState: {
