@@ -23,22 +23,22 @@ jobs:
             cardData: "DONT JOIN! I AM AFK! #4"
           - server: server5
             cardData: "DONT JOIN! I AM AFK! #5"
-          - server: server6
-            cardData: "DONT JOIN! I AM AFK! #6"
-          - server: server7
-            cardData: "DONT JOIN! I AM AFK! #7"
-          - server: server8
-            cardData: "DONT JOIN! I AM AFK! #8"
-          - server: server9
-            cardData: "DONT JOIN! I AM AFK! #9"
-          - server: server10
-            cardData: "DONT JOIN! I AM AFK! #10"
-          - server: server11
-            cardData: "DONT JOIN! I AM AFK! #11"
-          - server: server12
-            cardData: "DONT JOIN! I AM AFK! #12"
-          - server: server13
-            cardData: "DONT JOIN! I AM AFK! #13"
+          # - server: server6
+          #   cardData: "DONT JOIN! I AM AFK! #6"
+          # - server: server7
+          #   cardData: "DONT JOIN! I AM AFK! #7"
+          # - server: server8
+          #   cardData: "DONT JOIN! I AM AFK! #8"
+          # - server: server9
+          #   cardData: "DONT JOIN! I AM AFK! #9"
+          # - server: server10
+          #   cardData: "DONT JOIN! I AM AFK! #10"
+          # - server: server11
+          #   cardData: "DONT JOIN! I AM AFK! #11"
+          # - server: server12
+          #   cardData: "DONT JOIN! I AM AFK! #12"
+          # - server: server13
+          #   cardData: "DONT JOIN! I AM AFK! #13"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
